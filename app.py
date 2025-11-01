@@ -26,7 +26,7 @@ UNCLAIMED_COLOR = "#A9A9A9"
 # Treat these as the center (0,0) of the map
 ORIGIN_X = 0
 ORIGIN_Z = 0
-CHUNK_BLOCK_SIZE = 8  # each cell is an 8×8 block chunk
+CHUNK_BLOCK_SIZE = 16  # each CSV cell is a chunk; each chunk = 16×16 blocks
 
 
 def get_palette(n: int) -> list:
@@ -434,8 +434,18 @@ else:
             max_lines = 200
             step = int(np.ceil(max(h, w) / max(1, max_lines // 2)))
             step = max(1, step)
-            # vertical
-            for j in range(0, w + 1, step):
+
+            # Compute origin indices so stepped grid includes world 0
+            # world x at 0 corresponds to j_origin where x0 + j_origin*s == 0 => j_origin = -x0 / s
+            # clamp/round to integer
+            j_origin = int(round((-x0) / s))
+            i_origin = int(round((-y0) / s))
+            # starting offsets so the range(...) will hit the origin index
+            j_start = j_origin % step
+            i_start = i_origin % step
+
+            # vertical (start from j_start so one line lands at x==0)
+            for j in range(j_start, w + 1, step):
                 x = x0 + j * s
                 shapes.append(
                     dict(
@@ -448,8 +458,8 @@ else:
                         layer="above",
                     )
                 )
-            # horizontal
-            for i in range(0, h + 1, step):
+            # horizontal (start from i_start so one line lands at y==0)
+            for i in range(i_start, h + 1, step):
                 y = y0 + i * s
                 shapes.append(
                     dict(
@@ -462,6 +472,33 @@ else:
                         layer="above",
                     )
                 )
+
+            # Add prominent origin axes at world coordinate (0,0) so grid is visually centered
+            # vertical line at x=0
+            shapes.append(
+                dict(
+                    type="line",
+                    x0=0,
+                    x1=0,
+                    y0=y0,
+                    y1=y0 + h * s,
+                    line=dict(color="rgba(0,184,255,0.95)", width=2),
+                    layer="above",
+                )
+            )
+            # horizontal line at y=0
+            shapes.append(
+                dict(
+                    type="line",
+                    x0=x0,
+                    x1=x0 + w * s,
+                    y0=0,
+                    y1=0,
+                    line=dict(color="rgba(0,184,255,0.95)", width=2),
+                    layer="above",
+                )
+            )
+
         fig.update_layout(shapes=shapes)
 
         # One-time auto-zoom to matched claims
@@ -529,6 +566,7 @@ else:
 
     except Exception as e:
         st.error(f"Failed to parse or render {csv_path.name}: {e}")
+
 
 
 
