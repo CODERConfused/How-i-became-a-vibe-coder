@@ -273,11 +273,10 @@ else:
         st.session_state["search_term"] = term
     term_upper = term.strip().upper()
 
-    show_legend = st.sidebar.checkbox("Show legend in sidebar", True)
+    # grid toggle and highlight/dim controls
     show_grid = st.sidebar.checkbox(
         "Gridlines", True, help="Draws chunk boundaries over the image"
     )
-    # Highlight + dim toggles
     highlight = st.sidebar.checkbox("Highlight matches", True)
     dim_others = st.sidebar.checkbox(
         "Dim non-matches", True, help="Dim other claimed factions when searching"
@@ -378,23 +377,36 @@ else:
             go.Image(z=img, x0=x0, y0=y0, dx=CHUNK_BLOCK_SIZE, dy=CHUNK_BLOCK_SIZE)
         )
 
-        # Compose a single RGBA overlay image for dim + highlight (faster than multiple heatmaps)
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        if term:
-            # Dim other claimed factions (not unloaded/unclaimed)
-            if dim_others:
-                dim_mask = (~claims_mask) & (~unloaded_mask_map) & (~unclaimed_mask_map)
-                if dim_mask.any():
-                    overlay[dim_mask, 0:3] = 0  # black
-                    overlay[dim_mask, 3] = 153  # ~0.60 alpha
-            # Highlight matches (overrides dim)
-            if highlight and claims_mask.any():
-                overlay[claims_mask, 0:3] = (255, 255, 0)  # yellow
-                overlay[claims_mask, 3] = 220  # strong alpha
-        if overlay[..., 3].any():
+        # Compose overlay: use Heatmap traces so unclaimed/unloaded are never dimmed
+        # Dim non-matching claimed chunks (explicit mask excludes unloaded/unclaimed)
+        if term and dim_others:
+            dim_mask = (~claims_mask) & (~unloaded_mask_map) & (~unclaimed_mask_map)
+            if dim_mask.any():
+                fig.add_trace(
+                    go.Heatmap(
+                        z=dim_mask.astype(np.uint8),
+                        x0=x0,
+                        dx=CHUNK_BLOCK_SIZE,
+                        y0=y0,
+                        dy=CHUNK_BLOCK_SIZE,
+                        showscale=False,
+                        colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0.60)"]],
+                        hoverinfo="skip",
+                    )
+                )
+
+        # Highlight matches (yellow overlay)
+        if term and highlight and claims_mask.any():
             fig.add_trace(
-                go.Image(
-                    z=overlay, x0=x0, y0=y0, dx=CHUNK_BLOCK_SIZE, dy=CHUNK_BLOCK_SIZE
+                go.Heatmap(
+                    z=claims_mask.astype(np.uint8),
+                    x0=x0,
+                    dx=CHUNK_BLOCK_SIZE,
+                    y0=y0,
+                    dy=CHUNK_BLOCK_SIZE,
+                    showscale=False,
+                    colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(255,255,0,0.85)"]],
+                    hoverinfo="skip",
                 )
             )
 
@@ -501,10 +513,9 @@ else:
             },
         )
 
-        # Sidebar legend
-        if show_legend:
-            with st.sidebar.expander("Legend", expanded=True):
-                render_legend(legend)
+        # Sidebar legend — always present, collapsed
+        with st.sidebar.expander("Legend", expanded=False):
+            render_legend(legend)
 
         # Info
         st.caption(
@@ -518,6 +529,7 @@ else:
 
     except Exception as e:
         st.error(f"Failed to parse or render {csv_path.name}: {e}")
+
 
 
 
