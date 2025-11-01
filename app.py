@@ -178,6 +178,47 @@ def render_legend(legend: list):
     st.markdown(html, unsafe_allow_html=True)
 
 
+# ----------------- INSERT: preprocessing helpers (must be defined before sidebar/UI uses) -----------------
+@st.cache_data(show_spinner=False)
+def preprocess_map(
+    df: pd.DataFrame,
+    treat_empty: bool,
+    unloaded_tokens: set,
+    unclaimed_tokens: set,
+):
+    # Uppercase strings and build masks (returned as numpy for speed)
+    upper_df = df.astype(str).apply(lambda col: col.str.strip().str.upper())
+    is_empty_df = (
+        (upper_df == "")
+        if treat_empty
+        else pd.DataFrame(False, index=upper_df.index, columns=upper_df.columns)
+    )
+    is_unloaded_df = upper_df.isin(list(unloaded_tokens))
+    is_unclaimed_df = upper_df.isin(list(unclaimed_tokens))
+    unloaded_mask = (is_unloaded_df | is_empty_df).to_numpy()
+    unclaimed_mask = (is_unclaimed_df & ~is_unloaded_df).to_numpy()
+    return upper_df, unloaded_mask, unclaimed_mask
+
+
+@st.cache_data(show_spinner=False)
+def compute_claims_mask(
+    upper_df: pd.DataFrame,
+    unloaded_mask: np.ndarray,
+    unclaimed_mask: np.ndarray,
+    term: str,
+):
+    if not term:
+        h, w = upper_df.shape
+        return np.zeros((h, w), dtype=bool)
+    hits_df = upper_df.apply(
+        lambda col: col.str.contains(term, case=False, na=False, regex=False)
+    )
+    claims_mask = hits_df.to_numpy() & ~unloaded_mask & ~unclaimed_mask
+    return claims_mask
+
+
+# ----------------- END INSERT --------------------------------------------------------
+
 # UI
 st.title("Minecraft Factions Map Viewer")
 
@@ -248,7 +289,10 @@ else:
         for i, p in enumerate(csv_files):
             try:
                 df_i = load_map(p, DELIMITER, HAS_HEADER)
-                mask_i_df = df_i.astype(str).apply(
+                upper_df_i, _, _ = preprocess_map(
+                    df_i, TREAT_EMPTY_AS_UNLOADED, UNLOADED_TOKENS, UNCLAIMED_TOKENS
+                )
+                mask_i_df = upper_df_i.apply(
                     lambda col: col.str.contains(
                         term, case=False, na=False, regex=False
                     )
@@ -320,30 +364,13 @@ else:
         x0 = int(ORIGIN_X - (w * s) / 2)
         y0 = int(ORIGIN_Z - (h * s) / 2)
 
-        # Build normalized strings and masks with pandas, then convert to numpy
-        upper_df = df.astype(str).apply(lambda col: col.str.strip().str.upper())
-        is_empty = (
-            (upper_df == "")
-            if TREAT_EMPTY_AS_UNLOADED
-            else pd.DataFrame(False, index=upper_df.index, columns=upper_df.columns)
+        # Preprocess and compute claims mask (cached)
+        upper_df, unloaded_mask_map, unclaimed_mask_map = preprocess_map(
+            df, TREAT_EMPTY_AS_UNLOADED, UNLOADED_TOKENS, UNCLAIMED_TOKENS
         )
-        is_unloaded_token = upper_df.isin(list(UNLOADED_TOKENS))
-        is_unclaimed_token = upper_df.isin(list(UNCLAIMED_TOKENS))
-        unloaded_mask_map = (is_unloaded_token | is_empty).to_numpy()
-        unclaimed_mask_map = (is_unclaimed_token & ~is_unloaded_token).to_numpy()
-
-        # Claims-only search mask (exclude unloaded/unclaimed) using substring matching (no regex)
-        if term:
-            search_hits_df = df.astype(str).apply(
-                lambda col: col.str.contains(term, case=False, na=False, regex=False)
-            )
-            claims_mask = (
-                (search_hits_df.to_numpy())
-                & (~unloaded_mask_map)
-                & (~unclaimed_mask_map)
-            )
-        else:
-            claims_mask = np.zeros((h, w), dtype=bool)
+        claims_mask = compute_claims_mask(
+            upper_df, unloaded_mask_map, unclaimed_mask_map, term
+        )
 
         # Build figure
         fig = go.Figure()
@@ -351,49 +378,27 @@ else:
             go.Image(z=img, x0=x0, y0=y0, dx=CHUNK_BLOCK_SIZE, dy=CHUNK_BLOCK_SIZE)
         )
 
-        # Dim overlay for other claimed factions (non-matches), unaffected unloaded/unclaimed
-        if dim_others and term:
-            dim_mask = (~claims_mask) & (~unloaded_mask_map) & (~unclaimed_mask_map)
-            if dim_mask.any():
-                fig.add_trace(
-                    go.Heatmap(
-                        z=dim_mask.astype(np.uint8),
-                        x0=x0,
-                        dx=CHUNK_BLOCK_SIZE,
-                        y0=y0,
-                        dy=CHUNK_BLOCK_SIZE,
-                        zmin=0,
-                        zmax=1,
-                        showscale=False,
-                        colorscale=[
-                            [0, "rgba(0,0,0,0)"],
-                            [1, "rgba(0,0,0,0.60)"],
-                        ],
-                        hoverinfo="skip",
-                    )
-                )
-
-        # Highlight overlay for matches
-        if highlight and claims_mask.any():
+        # Compose a single RGBA overlay image for dim + highlight (faster than multiple heatmaps)
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        if term:
+            # Dim other claimed factions (not unloaded/unclaimed)
+            if dim_others:
+                dim_mask = (~claims_mask) & (~unloaded_mask_map) & (~unclaimed_mask_map)
+                if dim_mask.any():
+                    overlay[dim_mask, 0:3] = 0  # black
+                    overlay[dim_mask, 3] = 153  # ~0.60 alpha
+            # Highlight matches (overrides dim)
+            if highlight and claims_mask.any():
+                overlay[claims_mask, 0:3] = (255, 255, 0)  # yellow
+                overlay[claims_mask, 3] = 220  # strong alpha
+        if overlay[..., 3].any():
             fig.add_trace(
-                go.Heatmap(
-                    z=claims_mask.astype(np.uint8),
-                    x0=x0,
-                    dx=CHUNK_BLOCK_SIZE,
-                    y0=y0,
-                    dy=CHUNK_BLOCK_SIZE,
-                    zmin=0,
-                    zmax=1,
-                    showscale=False,
-                    colorscale=[
-                        [0, "rgba(0,0,0,0)"],
-                        [1, "rgba(255,255,0,0.85)"],
-                    ],
-                    hoverinfo="skip",
+                go.Image(
+                    z=overlay, x0=x0, y0=y0, dx=CHUNK_BLOCK_SIZE, dy=CHUNK_BLOCK_SIZE
                 )
             )
 
-        # Hover overlay
+        # Hover overlay (kept as heatmap)
         fig.add_trace(
             go.Heatmap(
                 z=np.zeros((h, w), dtype=np.uint8),
@@ -404,19 +409,21 @@ else:
                 text=hover_text,
                 hovertemplate="Faction: %{text}<br>Block X: %{x}, Z: %{y}<extra></extra>",
                 showscale=False,
-                colorscale=[
-                    [0, "rgba(0,0,0,0)"],
-                    [1, "rgba(0,0,0,0)"],
-                ],
+                colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
                 hoverongaps=False,
             )
         )
 
-        # Gridlines as shapes above image
+        # Gridlines as shapes, thinned to avoid too many lines
         shapes = []
         if show_grid:
             grid_color = "rgba(255,255,255,0.15)"
-            for j in range(w + 1):
+            # Cap total lines ~200
+            max_lines = 200
+            step = int(np.ceil(max(h, w) / max(1, max_lines // 2)))
+            step = max(1, step)
+            # vertical
+            for j in range(0, w + 1, step):
                 x = x0 + j * s
                 shapes.append(
                     dict(
@@ -429,7 +436,8 @@ else:
                         layer="above",
                     )
                 )
-            for i in range(h + 1):
+            # horizontal
+            for i in range(0, h + 1, step):
                 y = y0 + i * s
                 shapes.append(
                     dict(
@@ -444,7 +452,7 @@ else:
                 )
         fig.update_layout(shapes=shapes)
 
-        # One-time auto-zoom to matched claims (only claimed chunks)
+        # One-time auto-zoom to matched claims
         if st.session_state.get("do_autozoom") and claims_mask.any():
             ii, jj = np.where(claims_mask)
             x_min = x0 + int(jj.min()) * s
@@ -510,6 +518,7 @@ else:
 
     except Exception as e:
         st.error(f"Failed to parse or render {csv_path.name}: {e}")
+
 
 
 
